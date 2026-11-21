@@ -1,6 +1,8 @@
+
 services:
   db:
     image: mariadb:11.4
+
     environment:
       MARIADB_ROOT_PASSWORD: root123
       MARIADB_DATABASE: student_auctions
@@ -9,6 +11,8 @@ services:
 
     volumes:
       - mariadb_data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
 
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
@@ -37,6 +41,3 @@ services:
 
 volumes:
   mariadb_data:
-  volumes:
-  - mariadb_data:/var/lib/mysql
-  - ./db/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
