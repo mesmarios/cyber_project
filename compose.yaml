@@ -1,0 +1,39 @@
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: root123
+      MARIADB_DATABASE: student_auctions
+      MARIADB_USER: student_app
+      MARIADB_PASSWORD: student123
+
+    volumes:
+      - mariadb_data:/var/lib/mysql
+
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+
+    ports:
+      - "5000:5000"
+
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: student_auctions
+      DB_USER: student_app
+      DB_PASSWORD: student123
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mariadb_data:
