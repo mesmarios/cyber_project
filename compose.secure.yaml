@@ -1,0 +1,10 @@
+name: student-auctions-secure
+
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:${SECURE_WEB_PORT:-5001}:5000"
+
+    environment:
+      FLASK_SECRET_KEY: ${SECURE_FLASK_SECRET_KEY:?Set SECURE_FLASK_SECRET_KEY in .env}
+      FLASK_SESSION_COOKIE_NAME: student_auctions_secure_session
