@@ -8,6 +8,7 @@ from flask import (
     abort,
     current_app,
     flash,
+    make_response,
     redirect,
     render_template,
     request,
@@ -25,18 +26,21 @@ bp = Blueprint("bids", __name__, template_folder="templates")
 MAX_BID = Decimal("99999999.99")  # Largest value in a DECIMAL(10,2) column.
 
 
-def find_public_auction(cursor, auction_id, *, lock=False):
+def find_auction(cursor, auction_id, *, public_only=False, lock=False):
     query = """
-        SELECT title, seller_id, starting_price, status, ends_at
+        SELECT title, seller_id, starting_price, is_public, status, ends_at, winner_user_id
         FROM auctions
-        WHERE id = %s AND is_public = TRUE
+        WHERE id = %s
     """
+    if public_only:
+        query += " AND is_public = TRUE"
     if lock:
-        query += "FOR UPDATE"
+        query += " FOR UPDATE"
     cursor.execute(query, (auction_id,))
     auction = cursor.fetchone()
     if auction is None:
-        abort(404, description="Public auction not found.")
+        message = "Public auction not found." if public_only else "Auction not found."
+        abort(404, description=message)
     return auction
 
 
@@ -61,7 +65,7 @@ def list_bids(auction_id):
 def render_bids_page(auction_id, error=None):
     try:
         with get_db().cursor(DictCursor) as cursor:
-            auction = find_public_auction(cursor, auction_id)
+            auction = find_auction(cursor, auction_id, public_only=True)
             cursor.execute(
                 """
                 SELECT amount, created_at
@@ -72,13 +76,19 @@ def render_bids_page(auction_id, error=None):
                 (auction_id,),
             )
             bids = cursor.fetchall()
+            winner = None
+            if auction["status"] == "closed" and auction["winner_user_id"] is not None:
+                winner = find_winning_bid(cursor, auction_id, auction, auction["winner_user_id"])
     except MySQLError:
         current_app.logger.exception("Could not load auction bids")
         abort(503, description="Bids are temporarily unavailable.")
 
-    restriction = bidding_restriction(auction, session.get("user_id"))
+    user_id = session.get("user_id")
+    restriction = bidding_restriction(auction, user_id)
+    is_seller = user_id == auction["seller_id"]
+    can_close = is_seller and auction["status"] == "open"
     csrf_token = None
-    if restriction is None:
+    if restriction is None or can_close:
         csrf_token = session.get("bids_csrf_token")
         if csrf_token is None:
             csrf_token = token_urlsafe()
@@ -90,6 +100,9 @@ def render_bids_page(auction_id, error=None):
         auction_id=auction_id,
         bids=bids,
         highest_bid=bids[0]["amount"] if bids else None,
+        winner=winner,
+        can_close=can_close,
+        show_winner_address=is_seller,
         restriction=restriction[0] if restriction else None,
         csrf_token=csrf_token,
         error=error,
@@ -112,7 +125,7 @@ def save_bid(auction_id, bidder_id, amount):
         connection.begin()
         with connection.cursor(DictCursor) as cursor:
             # Lock the auction first so concurrent submissions take turns.
-            auction = find_public_auction(cursor, auction_id, lock=True)
+            auction = find_auction(cursor, auction_id, public_only=True, lock=True)
             restriction = bidding_restriction(auction, bidder_id)
             if restriction:
                 message, status = restriction
@@ -131,9 +144,15 @@ def save_bid(auction_id, bidder_id, amount):
                 abort(400, description=f"Your bid must be higher than {minimum:.2f}.")
 
             cursor.execute(
-                "INSERT INTO bids (auction_id, bidder_id, amount) VALUES (%s, %s, %s)",
-                (auction_id, bidder_id, amount),
+                """
+                INSERT INTO bids (auction_id, bidder_id, amount)
+                SELECT %s, %s, %s FROM DUAL WHERE UTC_TIMESTAMP() < %s
+                """,
+                (auction_id, bidder_id, amount, auction["ends_at"]),
             )
+            # The deadline can pass while the highest bid is being checked.
+            if cursor.rowcount == 0:
+                abort(400, description="This auction has expired.")
         connection.commit()
     except Exception:
         connection.rollback()
@@ -165,3 +184,130 @@ def place_bid(auction_id):
 
     flash("Your bid was accepted.", "bids")
     return redirect(url_for("bids.list_bids", auction_id=auction_id), code=303)
+
+
+def require_auction_manager(cursor, auction, user_id):
+    cursor.execute("SELECT role FROM users WHERE id = %s AND is_active = TRUE", (user_id,))
+    user = cursor.fetchone()
+    if user and (auction["seller_id"] == user_id or user["role"] == "admin"):
+        return
+    if not auction["is_public"]:
+        abort(404, description="Auction not found.")
+    abort(403, description="Only the seller or an administrator can access this action.")
+
+
+def find_winning_bid(cursor, auction_id, auction, winner_user_id=None):
+    query = """
+        SELECT bids.bidder_id, bids.amount, users.username
+        FROM bids JOIN users ON users.id = bids.bidder_id
+        WHERE bids.auction_id = %s AND bids.bidder_id <> %s
+          AND bids.amount > %s AND bids.created_at < %s
+    """
+    parameters = (auction_id, auction["seller_id"], auction["starting_price"], auction["ends_at"])
+    if winner_user_id is not None:
+        query += " AND bids.bidder_id = %s"
+        parameters += (winner_user_id,)
+    # Equal amounts go to the earliest recorded bid ID.
+    query += " ORDER BY bids.amount DESC, bids.id ASC LIMIT 1"
+    cursor.execute(query, parameters)
+    return cursor.fetchone()
+
+
+def close_auction_transaction(auction_id, user_id):
+    connection = get_db()
+    try:
+        connection.begin()
+        with connection.cursor(DictCursor) as cursor:
+            # Bid submission takes this same lock before it reads or writes bids.
+            auction = find_auction(cursor, auction_id, lock=True)
+            require_auction_manager(cursor, auction, user_id)
+            if auction["status"] != "open":
+                abort(400, description="This auction is already closed.")
+
+            winner = find_winning_bid(cursor, auction_id, auction)
+            cursor.execute(
+                "UPDATE auctions SET status = 'closed', winner_user_id = %s WHERE id = %s",
+                (winner["bidder_id"] if winner else None, auction_id),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return auction, winner
+
+
+@bp.post("/auctions/<int:auction_id>/close")
+@login_required
+def close_auction(auction_id):
+    check_csrf_token()
+    try:
+        auction, winner = close_auction_transaction(auction_id, session["user_id"])
+    except MySQLError:
+        current_app.logger.exception("Could not close auction")
+        abort(503, description="The auction could not be closed. Please try again.")
+
+    if auction["is_public"]:
+        flash("Auction closed.", "bids")
+        return redirect(url_for("bids.list_bids", auction_id=auction_id), code=303)
+    return render_template(
+        "bids/closed.html",
+        auction=auction,
+        auction_id=auction_id,
+        winner=winner,
+        show_winner_address=True,
+    )
+
+
+@bp.get("/auctions/<int:auction_id>/winner-address")
+@login_required
+def winner_address(auction_id):
+    try:
+        with get_db().cursor(DictCursor) as cursor:
+            auction = find_auction(cursor, auction_id)
+            require_auction_manager(cursor, auction, session["user_id"])
+            if auction["status"] != "closed":
+                abort(400, description="This auction is still open.")
+            if auction["winner_user_id"] is None:
+                abort(404, description="This auction has no winner.")
+
+            cursor.execute(
+                "SELECT line1, city, postal_code FROM addresses WHERE user_id = %s",
+                (auction["winner_user_id"],),
+            )
+            address = cursor.fetchone()
+            if address is None:
+                abort(404, description="The winner has no delivery address.")
+    except MySQLError:
+        current_app.logger.exception("Could not load winner address")
+        abort(503, description="The winner's address is temporarily unavailable.")
+
+    response = make_response(render_template("bids/winner_address.html", auction=auction, address=address))
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@bp.get("/profile/<int:user_id>/address")
+@login_required
+def profile_address(user_id):
+    try:
+        with get_db().cursor(DictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT users.id, users.username,
+                       addresses.line1, addresses.city, addresses.postal_code
+                FROM users JOIN addresses ON addresses.user_id = users.id
+                WHERE users.id = %s
+                """,
+                (user_id,),
+            )
+            profile = cursor.fetchone()
+            if profile is None:
+                abort(404, description="Address not found.")
+    except MySQLError:
+        current_app.logger.exception("Could not load profile address")
+        abort(503, description="The address is temporarily unavailable.")
+
+    # Intentionally vulnerable: authentication is required, but ownership is not checked.
+    response = make_response(render_template("bids/profile_address.html", profile=profile))
+    response.headers["Cache-Control"] = "private, no-store"
+    return response

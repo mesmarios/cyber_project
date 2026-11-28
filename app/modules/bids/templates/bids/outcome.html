@@ -1,0 +1,10 @@
+<h2>Auction result</h2>
+{% if winner %}
+    <p>Winning bidder: {{ winner.username }}</p>
+    <p>Winning amount: {{ "%.2f" | format(winner.amount) }}</p>
+    {% if show_winner_address %}
+        <p><a href="{{ url_for('bids.winner_address', auction_id=auction_id) }}">View winner's delivery address</a></p>
+    {% endif %}
+{% else %}
+    <p>The auction closed without any valid bids.</p>
+{% endif %}

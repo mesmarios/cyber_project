@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Student delivery address{% endblock %}
+
+{% block content %}
+    <h1>Student delivery address</h1>
+    <p>Student: {{ profile.username }} (ID {{ profile.id }})</p>
+    <address>
+        {{ profile.line1 }}<br>
+        {{ profile.city }}<br>
+        {{ profile.postal_code }}
+    </address>
+{% endblock %}

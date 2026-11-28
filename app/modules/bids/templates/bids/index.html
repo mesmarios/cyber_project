@@ -28,12 +28,23 @@
     {% if restriction and restriction != error %}
         <p>{{ restriction }}</p>
     {% endif %}
-    {% if csrf_token %}
+    {% if not restriction and csrf_token %}
         <form method="post" action="{{ url_for('bids.place_bid', auction_id=auction_id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <label for="amount">Your bid amount</label>
             <input id="amount" name="amount" type="number" min="0.01" step="0.01" required>
             <button type="submit">Place bid</button>
         </form>
+    {% endif %}
+
+    {% if can_close %}
+        <form method="post" action="{{ url_for('bids.close_auction', auction_id=auction_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit">Close auction</button>
+        </form>
+    {% endif %}
+
+    {% if auction.status == 'closed' %}
+        {% include "bids/outcome.html" %}
     {% endif %}
 {% endblock %}

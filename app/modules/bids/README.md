@@ -4,6 +4,12 @@
 
 Each submission starts a MariaDB transaction and locks the auction row before checking the deadline and reading the highest bid. This makes competing submissions for the same auction take turns and ensures each one sees the bids committed before it acquired the lock.
 
+`POST /auctions/<id>/close` uses the same lock. The seller or an active administrator can close the auction. The close form appears on the public bidding page for its seller and uses the module's CSRF token. The highest eligible bid wins. An eligible bid beats the starting price, comes from someone other than the seller, and was recorded before the deadline. Ties go to the smallest bid ID. Closing without an eligible bid leaves the winner empty.
+
+`GET /auctions/<id>/winner-address` shows the delivery address to the seller or an active administrator after the auction closes with a winner. The address is read from `addresses` using the stored winner ID. The public bidding page displays only the winning username and amount.
+
+`GET /profile/<user_id>/address` is the isolated IDOR endpoint in the Vulnerable Version. It requires a signed-in session and uses a parameterized query, but intentionally omits the check that the requested user ID belongs to the signed-in user. It displays only the fictional username, user ID, and delivery-address fields.
+
 The app factory already registers the bidding Blueprint. The shared login helper redirects signed-out users to `/login`, which the Auth module needs to provide.
 
 ## Run the tests

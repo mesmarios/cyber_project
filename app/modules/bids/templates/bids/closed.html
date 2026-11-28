@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}Auction closed{% endblock %}
+
+{% block content %}
+    <h1>{{ auction.title }}</h1>
+    <p role="status">Auction closed.</p>
+    {% include "bids/outcome.html" %}
+{% endblock %}

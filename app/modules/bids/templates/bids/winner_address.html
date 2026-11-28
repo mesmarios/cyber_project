@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Winner's delivery address{% endblock %}
+
+{% block content %}
+    <h1>Winner's delivery address</h1>
+    <p>{{ auction.title }}</p>
+    <address>
+        {{ address.line1 }}<br>
+        {{ address.city }} {{ address.postal_code }}
+    </address>
+{% endblock %}
